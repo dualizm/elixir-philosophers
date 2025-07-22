@@ -8,6 +8,45 @@
 # Вопрос задачи заключается в том, чтобы разработать модель поведения (параллельный алгоритм),
 # при котором ни один из философов не будет голодать, то есть будет вечно чередовать приём пищи и размышления.
 
+defmodule Fork do
+  def start(), do: spawn(&available/0)
+
+  defp available() do
+    receive do
+      {:pick_up, pid} ->
+        send(pid, true)
+        gone()
+
+      _ ->
+        available()
+    end
+  end
+
+  defp gone() do
+    receive do
+      :put_down ->
+        available()
+
+      _ ->
+        gone()
+    end
+  end
+
+  def pick_up(fork) do
+    send(fork, {:pick_up, self()})
+
+    receive do
+      true -> true
+    after
+      1000 -> false
+    end
+  end
+
+  def put_down(fork) do
+    send(fork, :put_down)
+  end
+end
+
 defmodule Philosopher do
   defstruct name: "", left_fork: nil, right_fork: nil
 
@@ -21,25 +60,24 @@ defmodule Philosopher do
   end
 
   defp have_lunch(%Philosopher{name: name} = philosopher) do
-    IO.puts("Я #{name} думаю")
-    think()
+    think(name)
     get_forks(philosopher)
     IO.puts("Я #{name} закончил обед")
-    send(:lunch, :done)
+    Lunch.lunch_done()
   end
 
   defp get_forks(
          %Philosopher{name: name, left_fork: left_fork, right_fork: right_fork} = philosopher
        ) do
-    if Lunch.get_fork(left_fork) and Lunch.get_fork(right_fork) do
-      IO.puts("Мне #{name} удалось взять вилки")
+    if Fork.pick_up(left_fork) and Fork.pick_up(right_fork) do
       eat(name)
-      Lunch.back_fork(left_fork)
-      Lunch.back_fork(right_fork)
+      Fork.put_down(left_fork)
+      Fork.put_down(right_fork)
     else
       IO.puts("Мне #{name} не удалось взять вилки")
-      Lunch.back_fork(left_fork)
-      Lunch.back_fork(right_fork)
+      Fork.put_down(left_fork)
+      Fork.put_down(right_fork)
+      think(name)
       get_forks(philosopher)
     end
   end
@@ -49,67 +87,40 @@ defmodule Philosopher do
     Process.sleep(:rand.uniform(5000))
   end
 
-  defp think() do
+  defp think(name) do
+    IO.puts("Я #{name} думаю")
     Process.sleep(:rand.uniform(5000))
   end
 end
 
 defmodule Lunch do
-  @philosophers_count 5
+  @name :lunch
 
-  def start() do
-    Process.register(self(), :lunch)
+  def start(philosophers) do
+    Process.register(self(), @name)
+    n = length(philosophers)
+    forks = for _ <- 1..n, do: Fork.start()
 
-    ["Aristotle", "Plato", "Heidegger", "Hegel", "Kant"]
-    |> Enum.with_index(fn name, idx ->
-      Philosopher.start(
-        Philosopher.new(
-          name,
-          rem(abs(idx - 1 + @philosophers_count), @philosophers_count),
-          rem(abs(idx + @philosophers_count), @philosophers_count)
-        )
-      )
+    Enum.with_index(philosophers, fn name, i ->
+      left_fork = Enum.at(forks, rem(i - 1, n))
+      right_fork = Enum.at(forks, rem(i, n))
+      Philosopher.start(Philosopher.new(name, left_fork, right_fork))
     end)
 
-    table = List.duplicate(true, @philosophers_count) |> List.to_tuple()
-
-    lunch(table, @philosophers_count)
+    wait_for_competition(n)
   end
 
-  defp lunch(_, 0), do: IO.puts("Все философы закончили обед")
+  defp wait_for_competition(0), do: IO.puts("Все философы закончили обед")
 
-  defp lunch(table, n) do
+  defp wait_for_competition(n) do
     receive do
-      {:get_fork, {pid, fork}} ->
-        if elem(table, fork) do
-          send(pid, true)
-          lunch(put_elem(table, fork, false), n)
-        else
-          send(pid, false)
-          lunch(table, n)
-        end
-
-      {:back_fork, fork} ->
-        lunch(put_elem(table, fork, true), n)
-
-      :done ->
-        lunch(table, n - 1)
+      :done -> wait_for_competition(n - 1)
     end
   end
 
-  def get_fork(fork) do
-    send(:lunch, {:get_fork, {self(), fork}})
-
-    receive do
-      answer -> answer
-    after
-      3000 -> false
-    end
-  end
-
-  def back_fork(fork) do
-    send(:lunch, {:back_fork, fork})
+  def lunch_done() do
+    send(@name, :done)
   end
 end
 
-Lunch.start()
+Lunch.start(["Aristotle", "Plato", "Heidegger", "Hegel", "Kant"])
